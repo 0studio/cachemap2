@@ -1,7 +1,6 @@
 package cachemap
 
 import (
-	"math/rand"
 	"time"
 )
 
@@ -146,7 +145,7 @@ func (m *Uint64SafeCacheMap) process() {
 		m.keyList = ListPop(m.keyList, delId)
 	case total := <-m.cleanerTimer:
 		now := time.Now()
-		randList := randCheckList(m.keyList.Len(), total)
+		randList := RandCheckList(m.keyList.Len(), CHECK_COUNT, total)
 		for _, index := range randList {
 			ckId := m.keyList.Get(index)
 			m.checkKey(ckId, now)
@@ -194,14 +193,4 @@ func runTimer(cleanerTimer chan<- bool, interval time.Duration) {
 			}
 		}
 	}
-}
-
-func randCheckList(length int, isTotal bool) []int {
-	var randList IntSlice
-	randList = rand.Perm(length)
-	if !isTotal && length > CHECK_COUNT {
-		randList = randList[:CHECK_COUNT]
-	}
-	randList.Sort()
-	return randList
 }

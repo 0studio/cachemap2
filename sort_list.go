@@ -1,5 +1,9 @@
 package cachemap
 
+import (
+	"math/rand"
+)
+
 type SortList []uint64
 
 func CreateSortList() SortList {
@@ -72,6 +76,16 @@ func ListPops(list SortList, idList []uint64) SortList {
 		list = ListPop(list, id)
 	}
 	return list
+}
+
+func RandCheckList(length, checkCnt int, isTotal bool) []int {
+	var randList IntSlice
+	randList = rand.Perm(length)
+	if !isTotal && length > checkCnt {
+		randList = randList[:checkCnt]
+	}
+	randList.Sort()
+	return randList
 }
 
 func listFind(list SortList, userId uint64) (int, bool) {
