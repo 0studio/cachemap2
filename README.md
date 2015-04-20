@@ -1,5 +1,5 @@
 # Demo
-	m := NewUint64SafeCacheMap(time.Microsecond)
+	m := NewUint64SafeCacheMap(time.Microsecond, callback)
 	now := time.Now()
 	obj := NewCacheObject("hello", now, 1)
 	m.Put(1, obj)
