@@ -197,9 +197,11 @@ func runTimer(cleanerTimer chan<- bool, interval time.Duration) {
 }
 
 func randCheckList(length int, isTotal bool) []int {
-	randList := rand.Perm(length)
+	var randList IntSlice
+	randList = rand.Perm(length)
 	if !isTotal && length > CHECK_COUNT {
 		randList = randList[:CHECK_COUNT]
 	}
+	randList.Sort()
 	return randList
 }
