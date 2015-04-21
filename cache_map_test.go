@@ -25,7 +25,7 @@ func TestCacheMap(t *testing.T) {
 }
 
 func TestSafeCacheMap(t *testing.T) {
-	m := NewUint64SafeCacheMap(time.Microsecond, callback)
+	m := NewUint64SafeCacheMap(time.Microsecond, callback, 4, 3)
 	now := time.Now()
 	obj := NewCacheObject(100, now, 1)
 	m.Put(1, obj)
@@ -46,14 +46,15 @@ func TestSafeCacheMap(t *testing.T) {
 }
 
 func TestSafeMap(t *testing.T) {
-	m := NewUint64SafeCacheMap(time.Millisecond*500, callback)
+	m := NewUint64SafeCacheMap(time.Millisecond*500, callback, 4, 3)
 	now := time.Now()
 	for i := 1; i < 1000; i++ {
 		sec := i / 3
 		obj := NewCacheObject(i, now, sec)
 		m.Put(uint64(i), obj)
 	}
-	time.Sleep(time.Second * 20)
+	// time.Sleep(time.Second * 20)
+	m.DropCallback()
 }
 
 func callback(object interface{}) {

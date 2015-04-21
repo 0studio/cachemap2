@@ -24,9 +24,6 @@ func (m Uint64CacheMap) Get(key uint64, now time.Time) (obj interface{}, ok bool
 		return
 	}
 	obj, ok = cacheObj.GetObject(now)
-	if !ok { // expired
-		m.Delete(key)
-	}
 	return
 }
 
@@ -63,25 +60,32 @@ type resultGetter struct {
 type sizeGetter struct {
 	size chan int
 }
+type operateEnd struct {
+	end chan struct{}
+}
+
 type Uint64SafeCacheMap struct {
 	m                 Uint64CacheMap
 	keyList           SortList
 	setChan           chan uint64CacheObjectWapper
 	getChan           chan resultGetter
 	delChan           chan uint64
+	dropChan          chan operateEnd
 	cleanerTimer      chan bool
 	sizeChan          chan sizeGetter
 	callbackChan      chan interface{}
 	autoCleanInterval time.Duration
 }
 
-func NewUint64SafeCacheMap(autoCleanInterval time.Duration, callback func(interface{})) (m *Uint64SafeCacheMap) {
+// cleanTime -> total cleaning time(hour)
+func NewUint64SafeCacheMap(autoCleanInterval time.Duration, callback func(interface{}), funcCnt, cleanTime int) (m *Uint64SafeCacheMap) {
 	m = &Uint64SafeCacheMap{
 		m:                 make(Uint64CacheMap),
 		keyList:           CreateSortList(),
 		setChan:           make(chan uint64CacheObjectWapper),
 		getChan:           make(chan resultGetter),
 		delChan:           make(chan uint64),
+		dropChan:          make(chan operateEnd),
 		cleanerTimer:      make(chan bool),
 		sizeChan:          make(chan sizeGetter),
 		callbackChan:      make(chan interface{}, CALLBACK_CHANNEL),
@@ -89,11 +93,13 @@ func NewUint64SafeCacheMap(autoCleanInterval time.Duration, callback func(interf
 	}
 	go func() {
 		for {
-			m.process()
+			m.process(callback)
 		}
 	}()
-	go runCallback(m.callbackChan, callback)
-	go runTimer(m.cleanerTimer, m.autoCleanInterval)
+	for i := 0; i < funcCnt; i++ {
+		go runCallback(m.callbackChan, callback)
+	}
+	go runTimer(m.cleanerTimer, m.autoCleanInterval, cleanTime)
 	return
 }
 func (safeMap *Uint64SafeCacheMap) Put(key uint64, obj CacheObject) {
@@ -130,7 +136,13 @@ func (safeMap *Uint64SafeCacheMap) GetDirtyKeys() (keys []uint64) {
 	return
 }
 
-func (m *Uint64SafeCacheMap) process() {
+func (safeMap *Uint64SafeCacheMap) DropCallback() {
+	op := operateEnd{end: make(chan struct{})}
+	safeMap.dropChan <- op
+	<-op.end
+}
+
+func (m *Uint64SafeCacheMap) process(callback func(interface{})) {
 	defer recover()
 	select {
 	case setter := <-m.setChan:
@@ -143,6 +155,9 @@ func (m *Uint64SafeCacheMap) process() {
 	case delId := <-m.delChan:
 		m.m.Delete(delId)
 		m.keyList = ListPop(m.keyList, delId)
+	case resutl := <-m.dropChan:
+		m.dropCallback(callback)
+		resutl.end <- struct{}{}
 	case total := <-m.cleanerTimer:
 		now := time.Now()
 		randList := RandCheckList(m.keyList.Len(), CHECK_COUNT, total)
@@ -152,6 +167,16 @@ func (m *Uint64SafeCacheMap) process() {
 		}
 	case sizeGetter := <-m.sizeChan:
 		sizeGetter.size <- len(m.m)
+	}
+}
+
+func (m *Uint64SafeCacheMap) dropCallback(callback func(interface{})) {
+	for _, cacheObj := range m.m {
+		obj := cacheObj.Get()
+		func() {
+			defer recover()
+			callback(obj)
+		}()
 	}
 }
 
@@ -176,21 +201,19 @@ func runCallback(callbackChan <-chan interface{}, callbackFunc func(interface{})
 	}
 }
 
-func runTimer(cleanerTimer chan<- bool, interval time.Duration) {
-	var isSweep bool = true
+func runTimer(cleanerTimer chan<- bool, interval time.Duration, cleanTime int) {
+	var isSweep, result bool = true, false
 	for {
 		time.Sleep(interval)
-		hour := time.Now().Hour()
-		if hour < TOTAL_CLEAN_TIME {
-			isSweep = false
-			cleanerTimer <- false
-		} else {
+		if time.Now().Hour() > cleanTime {
 			if !isSweep {
-				isSweep = true
-				cleanerTimer <- true
+				isSweep, result = true, true
 			} else {
-				cleanerTimer <- false
+				result = false
 			}
+		} else {
+			isSweep, result = false, false
 		}
+		cleanerTimer <- result
 	}
 }
