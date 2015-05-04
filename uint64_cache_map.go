@@ -143,7 +143,7 @@ func (safeMap *Uint64SafeCacheMap) DropCallback() {
 }
 
 func (m *Uint64SafeCacheMap) process(callback func(interface{})) {
-	defer recover()
+	defer func() { recover() }()
 	select {
 	case setter := <-m.setChan:
 		m.m.Put(setter.key, setter.obj)
@@ -173,10 +173,7 @@ func (m *Uint64SafeCacheMap) process(callback func(interface{})) {
 func (m *Uint64SafeCacheMap) dropCallback(callback func(interface{})) {
 	for _, cacheObj := range m.m {
 		obj := cacheObj.Get()
-		func() {
-			defer recover()
-			callback(obj)
-		}()
+		saveFunc(callback, obj)
 	}
 }
 
@@ -193,10 +190,7 @@ func runCallback(callbackChan <-chan interface{}, callbackFunc func(interface{})
 	for {
 		select {
 		case object := <-callbackChan:
-			func() {
-				defer recover()
-				callbackFunc(object)
-			}()
+			saveFunc(callbackFunc, object)
 		}
 	}
 }
@@ -216,4 +210,9 @@ func runTimer(cleanerTimer chan<- bool, interval time.Duration, cleanTime int) {
 		}
 		cleanerTimer <- result
 	}
+}
+
+func saveFunc(fun func(interface{}), obj interface{}) {
+	defer func() { recover() }()
+	fun(obj)
 }
