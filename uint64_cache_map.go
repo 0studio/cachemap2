@@ -1,6 +1,8 @@
 package cachemap
 
 import (
+	"github.com/jonhoo/drwmutex"
+	"sync"
 	"time"
 )
 
@@ -9,6 +11,8 @@ const (
 	TOTAL_CLEAN_TIME = 3 // 凌晨3点
 	CALLBACK_CHANNEL = 18
 )
+
+type CallbackFunc func(interface{})
 
 ////////////////////////////////////////////////////////////////////////////////
 type Uint64CacheMap map[uint64]CacheObject
@@ -67,126 +71,126 @@ type operateEnd struct {
 type Uint64SafeCacheMap struct {
 	m                 Uint64CacheMap
 	keyList           SortList
-	setChan           chan uint64CacheObjectWapper
-	getChan           chan resultGetter
-	delChan           chan uint64
-	dropChan          chan operateEnd
 	cleanerTimer      chan bool
-	sizeChan          chan sizeGetter
 	callbackChan      chan interface{}
+	callback          CallbackFunc
 	autoCleanInterval time.Duration
+	mutexList         []drwmutex.DRWMutex
 }
 
 // cleanTime -> total cleaning time(hour)
-func NewUint64SafeCacheMap(autoCleanInterval time.Duration, callback func(interface{}), funcCnt, cleanTime int) (m *Uint64SafeCacheMap) {
+func NewUint64SafeCacheMap(autoCleanInterval time.Duration, callback CallbackFunc, funcCnt, cleanTime, mutexCnt int) (m *Uint64SafeCacheMap) {
 	m = &Uint64SafeCacheMap{
 		m:                 make(Uint64CacheMap),
 		keyList:           CreateSortList(),
-		setChan:           make(chan uint64CacheObjectWapper),
-		getChan:           make(chan resultGetter),
-		delChan:           make(chan uint64),
-		dropChan:          make(chan operateEnd),
 		cleanerTimer:      make(chan bool),
-		sizeChan:          make(chan sizeGetter),
 		callbackChan:      make(chan interface{}, CALLBACK_CHANNEL),
+		callback:          callback,
 		autoCleanInterval: autoCleanInterval,
 	}
-	go func() {
-		for {
-			m.process(callback)
-		}
-	}()
+	for i := 0; i < mutexCnt; i++ {
+		mutex := drwmutex.New()
+		m.mutexList = append(m.mutexList, mutex)
+	}
 	for i := 0; i < funcCnt; i++ {
-		go runCallback(m.callbackChan, callback)
+		go runCallback(m.callbackChan, m.callback)
 	}
 	go runTimer(m.cleanerTimer, m.autoCleanInterval, cleanTime)
-	return
-}
-func (safeMap *Uint64SafeCacheMap) Put(key uint64, obj CacheObject) {
-	safeMap.setChan <- uint64CacheObjectWapper{key: key, obj: obj}
-}
-func (safeMap *Uint64SafeCacheMap) Get(key uint64, now time.Time) (obj interface{}, ok bool) {
-	getter := resultGetter{key: key, now: now, result: make(chan resultWapper)}
-	safeMap.getChan <- getter
-	result := <-getter.result
-	obj = result.obj
-	ok = result.ok
-	close(getter.result)
+
+	go func() {
+		for {
+			select {
+			case total := <-m.cleanerTimer:
+				m.process(total)
+			}
+		}
+	}()
 	return
 }
 
-func (safeMap *Uint64SafeCacheMap) Size() (size int) {
-	sizeGetter := sizeGetter{size: make(chan int)}
-	safeMap.sizeChan <- sizeGetter
-	size = <-sizeGetter.size
-	close(sizeGetter.size)
+func (this *Uint64SafeCacheMap) lock(key uint64) {
+	index := key % uint64(len(this.mutexList))
+	this.mutexList[index].Lock()
+}
+
+func (this *Uint64SafeCacheMap) unlock(key uint64) {
+	index := key % uint64(len(this.mutexList))
+	this.mutexList[index].Unlock()
+}
+
+func (this *Uint64SafeCacheMap) rLock(key uint64) sync.Locker {
+	index := key % uint64(len(this.mutexList))
+	return this.mutexList[index].RLock()
+}
+
+func (this *Uint64SafeCacheMap) rUnlock(l sync.Locker) {
+	l.Unlock()
+}
+
+func (this *Uint64SafeCacheMap) Put(key uint64, obj CacheObject) {
+	this.lock(key)
+	defer this.unlock(key)
+	this.m.Put(key, obj)
+	this.keyList = ListPush(this.keyList, key)
+}
+
+func (this *Uint64SafeCacheMap) Get(key uint64, now time.Time) (obj interface{}, ok bool) {
+	this.lock(key)
+	defer this.unlock(key)
+	this.checkKey(key, now)
+	obj, ok = this.m.Get(key, now)
 	return
 }
 
-// 这个不会调用销毁回调函数
-func (safeMap *Uint64SafeCacheMap) Delete(key uint64) bool {
-	safeMap.delChan <- key
+func (this *Uint64SafeCacheMap) Delete(key uint64) bool {
+	this.lock(key)
+	defer this.unlock(key)
+	ret, ok := this.m.Get(key, time.Now())
+	if ok {
+		this.m.Delete(key)
+		this.keyList = ListPop(this.keyList, key)
+		this.callbackChan <- ret
+	}
 	return true
 }
-func (safeMap *Uint64SafeCacheMap) GetDirtyKeys() (keys []uint64) {
-	keys = make([]uint64, 0, len(safeMap.m))
-	for key, _ := range safeMap.m {
-		keys = append(keys, key)
-	}
-	return
+
+func (this *Uint64SafeCacheMap) Size() int {
+	return len(this.m)
 }
 
-func (safeMap *Uint64SafeCacheMap) DropCallback() {
-	op := operateEnd{end: make(chan struct{})}
-	safeMap.dropChan <- op
-	<-op.end
-}
-
-func (m *Uint64SafeCacheMap) process(callback func(interface{})) {
-	defer func() { recover() }()
-	select {
-	case setter := <-m.setChan:
-		m.m.Put(setter.key, setter.obj)
-		m.keyList = ListPush(m.keyList, setter.key)
-	case getter := <-m.getChan:
-		m.checkKey(getter.key, getter.now)
-		ret, ok := m.m.Get(getter.key, getter.now)
-		getter.result <- resultWapper{obj: ret, ok: ok}
-	case delId := <-m.delChan:
-		m.m.Delete(delId)
-		m.keyList = ListPop(m.keyList, delId)
-	case resutl := <-m.dropChan:
-		m.dropCallback(callback)
-		resutl.end <- struct{}{}
-	case total := <-m.cleanerTimer:
-		now := time.Now()
-		randList := RandCheckList(m.keyList.Len(), CHECK_COUNT, total)
-		for _, index := range randList {
-			ckId := m.keyList.Get(index)
-			m.checkKey(ckId, now)
-		}
-	case sizeGetter := <-m.sizeChan:
-		sizeGetter.size <- len(m.m)
-	}
-}
-
-func (m *Uint64SafeCacheMap) dropCallback(callback func(interface{})) {
-	for _, cacheObj := range m.m {
+func (this *Uint64SafeCacheMap) SaveAll() {
+	for _, cacheObj := range this.m {
 		obj := cacheObj.Get()
-		saveFunc(callback, obj)
+		saveFunc(this.callback, obj)
 	}
 }
 
-func (m *Uint64SafeCacheMap) checkKey(key uint64, now time.Time) {
-	ret, ok := m.m.Expired(key, now)
+func (this *Uint64SafeCacheMap) CheckKey(key uint64, now time.Time) {
+	this.lock(key)
+	defer this.unlock(key)
+	this.checkKey(key, now)
+}
+
+func (this *Uint64SafeCacheMap) process(isTotal bool) {
+	defer func() { recover() }()
+	now := time.Now()
+	randList := RandCheckList(this.keyList.Len(), CHECK_COUNT, isTotal)
+	for _, index := range randList {
+		ckId := this.keyList.Get(index)
+		this.CheckKey(ckId, now)
+	}
+}
+
+func (this *Uint64SafeCacheMap) checkKey(key uint64, now time.Time) {
+	ret, ok := this.m.Expired(key, now)
 	if ok {
-		m.m.Delete(key)
-		m.keyList = ListPop(m.keyList, key)
-		m.callbackChan <- ret
+		this.m.Delete(key)
+		this.keyList = ListPop(this.keyList, key)
+		this.callbackChan <- ret
 	}
 }
 
-func runCallback(callbackChan <-chan interface{}, callbackFunc func(interface{})) {
+func runCallback(callbackChan <-chan interface{}, callbackFunc CallbackFunc) {
 	for {
 		select {
 		case object := <-callbackChan:
